@@ -1,1 +1,1 @@
-# kk
+# Projekat iz predmeta Konstrukija kompilatora
