@@ -23,11 +23,14 @@ enum Token
 
     // primary
     tok_identifier = -4,
-    tok_number = -5
+    tok_int = -5,
+    tok_double = -6,
+    tok_arg_type = -7
 };
 
 static std::string IdentifierStr; // Filled in if tok_identifier
-static double NumVal;             // Filled in if tok_number
+static int intVal;
+static double dblVal;
 
 /// gettok - Return the next token from standard input.
 static int gettok()
@@ -48,20 +51,46 @@ static int gettok()
             return tok_func;
         if (IdentifierStr == "var")
             return tok_var;
+        if (IdentifierStr == "Int")
+            return tok_arg_type;
+        if (IdentifierStr == "Double")
+            return tok_arg_type;
         return tok_identifier;
     }
 
-    if (isdigit(LastChar) || LastChar == '.')
-    { // Number: [0-9.]+
-        std::string NumStr;
+    // Integer: [0-9]+ or Float: [0-9]+.[0-9]+
+    if (isdigit(LastChar) || (LastChar == '.'))
+    {
+        std::string numStr;
+        bool isFloat = false;
+
         do
         {
-            NumStr += LastChar;
-            LastChar = getchar();
-        } while (isdigit(LastChar) || LastChar == '.');
+            numStr += LastChar;
 
-        NumVal = strtod(NumStr.c_str(), nullptr);
-        return tok_number;
+            if (LastChar == '.')
+            {
+                if (isFloat)
+                {
+                    break;
+                }
+
+                isFloat = true;
+            }
+
+            LastChar = getchar();
+        } while (isdigit(LastChar) || (!isFloat && LastChar == '.'));
+
+        if (isFloat)
+        {
+            dblVal = strtod(numStr.c_str(), nullptr);
+            return tok_double;
+        }
+        else
+        {
+            intVal = strtol(numStr.c_str(), nullptr, 10);
+            return tok_int;
+        }
     }
 
     if (LastChar == '#')
@@ -99,13 +128,22 @@ namespace
         virtual ~ExprAST() = default;
     };
 
-    /// NumberExprAST - Expression class for numeric literals like "1.0".
-    class NumberExprAST : public ExprAST
+    // IntegerExprAST - Expression class for integer literals like "1".
+    class IntegerExprAST : public ExprAST
+    {
+        int Val;
+
+    public:
+        IntegerExprAST(int Val) : Val(Val) {}
+    };
+
+    // DoubleExprAST - Expression class for float literals like "1.0".
+    class DoubleExprAST : public ExprAST
     {
         double Val;
 
     public:
-        NumberExprAST(double Val) : Val(Val) {}
+        DoubleExprAST(double Val) : Val(Val) {}
     };
 
     /// VariableExprAST - Expression class for referencing a variable, like "a".
@@ -147,11 +185,11 @@ namespace
     class PrototypeAST
     {
         std::string Name;
-        std::vector<std::string> Args;
+        std::vector<std::pair<std::string, std::string>> Args; // Argument name and type pairs.
 
     public:
-        PrototypeAST(const std::string &Name, std::vector<std::string> Args)
-            : Name(Name), Args(std::move(Args)) {}
+        PrototypeAST(const std::string &name, std::vector<std::pair<std::string, std::string>> args)
+            : Name(name), Args(std::move(args)) {}
 
         const std::string &getName() const { return Name; }
     };
@@ -211,10 +249,18 @@ std::unique_ptr<PrototypeAST> LogErrorP(const char *Str)
 
 static std::unique_ptr<ExprAST> ParseExpression();
 
-/// numberexpr ::= number
-static std::unique_ptr<ExprAST> ParseNumberExpr()
+// integer
+static std::unique_ptr<ExprAST> ParseIntegerExpr()
 {
-    auto Result = std::make_unique<NumberExprAST>(NumVal);
+    auto Result = std::make_unique<IntegerExprAST>(intVal);
+    getNextToken(); // consume the number
+    return std::move(Result);
+}
+
+// double
+static std::unique_ptr<ExprAST> ParseDoubleExpr()
+{
+    auto Result = std::make_unique<DoubleExprAST>(dblVal);
     getNextToken(); // consume the number
     return std::move(Result);
 }
@@ -284,8 +330,10 @@ static std::unique_ptr<ExprAST> ParsePrimary()
         return LogError("unknown token when expecting an expression");
     case tok_identifier:
         return ParseIdentifierExpr();
-    case tok_number:
-        return ParseNumberExpr();
+    case tok_int:
+        return ParseIntegerExpr();
+    case tok_double:
+        return ParseDoubleExpr();
     case '(':
         return ParseParenExpr();
     }
@@ -356,13 +404,28 @@ static std::unique_ptr<PrototypeAST> ParsePrototype()
     if (CurTok != '(')
         return LogErrorP("Expected '(' in prototype");
 
-    std::vector<std::string> ArgNames;
+    std::vector<std::pair<std::string, std::string>> ArgNamesTypes;
     getNextToken();
     while (CurTok == tok_identifier)
     {
-        ArgNames.push_back(IdentifierStr);
+        std::string ArgName = IdentifierStr;
+        getNextToken(); // eat arg name
+
+        if (CurTok != ':')
+            return LogErrorP("Expected ':' after argument name");
+
+        getNextToken(); // eat ':'
+
+        if (CurTok != tok_arg_type)
+            return LogErrorP("Expected argument type");
+
+        std::string ArgType = IdentifierStr;
+
+        ArgNamesTypes.push_back(std::make_pair(ArgName, ArgType));
+
         getNextToken(); // eat ','
-        if(CurTok == ',') {
+        if (CurTok == ',')
+        {
             getNextToken();
         }
     }
@@ -372,7 +435,7 @@ static std::unique_ptr<PrototypeAST> ParsePrototype()
     // success.
     getNextToken(); // eat ')'.
 
-    return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames));
+    return std::make_unique<PrototypeAST>(FnName, std::move(ArgNamesTypes));
 }
 
 /// definition ::= 'func' prototype expression
@@ -406,9 +469,14 @@ static std::unique_ptr<FunctionAST> ParseTopLevelExpr()
 {
     if (auto E = ParseExpression())
     {
-        // Make an anonymous proto.
-        auto Proto = std::make_unique<PrototypeAST>("__anon_expr",
-                                                    std::vector<std::string>());
+        // Create a vector of pairs for argument names and types
+        std::vector<std::pair<std::string, std::string>> args;
+        args.push_back(std::make_pair("arg1", "Int"));
+        args.push_back(std::make_pair("arg2", "Double"));
+
+        // Use std::make_unique to create a PrototypeAST object
+        auto Proto = std::make_unique<PrototypeAST>("__anon_expr", std::move(args));
+
         return std::make_unique<FunctionAST>(std::move(Proto), std::move(E));
     }
     return nullptr;
